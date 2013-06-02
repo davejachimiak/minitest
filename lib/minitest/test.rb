@@ -87,10 +87,13 @@ module Minitest
 
     attr_accessor :time
 
-    def dup # :nodoc:
-      obj = super
-      obj.time = self.time
-      obj
+    def marshal_dump # :nodoc:
+      super << self.time
+    end
+
+    def marshal_load ary # :nodoc:
+      self.time = ary.pop
+      super
     end
 
     ##
@@ -265,19 +268,14 @@ module Minitest
       }.join "\n"
     end
 
-    def with_info_handler # :nodoc:
-      supports_info_signal = Signal.list["INFO"]
-
+    def with_info_handler &block # :nodoc:
       t0 = Time.now
 
-      trap "INFO" do
-        warn ""
-        warn "Current: %s#%s %.2fs" % [self.class, self.name, Time.now - t0]
-      end if supports_info_signal
+      handler = lambda do
+        warn "\nCurrent: %s#%s %.2fs" % [self.class, self.name, Time.now - t0]
+      end
 
-      yield
-    ensure
-      trap "INFO", "DEFAULT" if supports_info_signal
+      self.class.on_signal "INFO", handler, &block
     end
 
     include LifecycleHooks

@@ -4,7 +4,7 @@ require "optparse"
 # :include: README.txt
 
 module Minitest
-  VERSION = "5.0.1" # :nodoc:
+  VERSION = "5.0.3" # :nodoc:
 
   @@installed_at_exit ||= false
   @@after_run = []
@@ -102,15 +102,16 @@ module Minitest
     options = process_args args
 
     reporter = CompositeReporter.new
-    reporter << Reporter.new(options[:io], options)
+    reporter << ProgressReporter.new(options[:io], options)
+    reporter << SummaryReporter.new(options[:io], options)
 
     self.reporter = reporter # this makes it available to plugins
     self.init_plugins options
     self.reporter = nil # runnables shouldn't depend on the reporter, ever
 
-    reporter.run_and_report do
-      __run reporter, options
-    end
+    reporter.start
+    __run reporter, options
+    reporter.report
 
     reporter.passed?
   end
@@ -260,11 +261,39 @@ module Minitest
         filter === m || filter === "#{self}##{m}"
       }
 
-      filtered_methods.each do |method_name|
-        result = self.new(method_name).run
-        raise "#{self}#run _must_ return self" unless self === result
-        reporter.record result
+      with_info_handler reporter do
+        filtered_methods.each do |method_name|
+          result = self.new(method_name).run
+          raise "#{self}#run _must_ return self" unless self === result
+          reporter.record result
+        end
       end
+    end
+
+    def self.with_info_handler reporter, &block # :nodoc:
+      handler = lambda do
+        unless reporter.passed? then
+          warn "Current results:"
+          warn ""
+          warn reporter.reporters.first
+          warn ""
+        end
+      end
+
+      on_signal "INFO", handler, &block
+    end
+
+    def self.on_signal name, action # :nodoc:
+      supported = Signal.list[name]
+
+      old_trap = trap name do
+        old_trap.call if old_trap.respond_to? :call
+        action.call
+      end if supported
+
+      yield
+    ensure
+      trap name, old_trap if supported
     end
 
     ##
@@ -282,14 +311,12 @@ module Minitest
       @@runnables
     end
 
-    def dup # :nodoc:
-      obj = self.class.new self.name
+    def marshal_dump # :nodoc:
+      [self.name, self.failures, self.assertions]
+    end
 
-      obj.name       = self.name
-      obj.failures   = self.failures.dup
-      obj.assertions = self.assertions
-
-      obj
+    def marshal_load ary # :nodoc:
+      self.name, self.failures, self.assertions = ary
     end
 
     def failure # :nodoc:
@@ -336,19 +363,38 @@ module Minitest
   end
 
   ##
-  # Collects and reports the result of all runs.
+  # Defines the API for Reporters. Subclass this and override whatever
+  # you want. Go nuts.
 
-  class Reporter
+  class AbstractReporter
     ##
-    # The count of assertions run.
+    # Starts reporting on the run.
 
-    attr_accessor :assertions
+    def start
+    end
 
     ##
-    # The count of runnable methods ran.
+    # Record a result and output the Runnable#result_code. Stores the
+    # result of the run if the run did not pass.
 
-    attr_accessor :count
+    def record result
+    end
 
+    ##
+    # Outputs the summary of the run.
+
+    def report
+    end
+
+    ##
+    # Did this run pass?
+
+    def passed?
+      true
+    end
+  end
+
+  class Reporter < AbstractReporter # :nodoc:
     ##
     # The IO used to report.
 
@@ -359,21 +405,48 @@ module Minitest
 
     attr_accessor :options
 
-    ##
-    # The results of all the runs. (Non-passing only to cut down on memory)
-
-    attr_accessor :results
-
-    ##
-    # The start time of the run.
-
-    attr_accessor :start_time
-
-    attr_accessor :sync, :old_sync # :nodoc:
-
     def initialize io = $stdout, options = {} # :nodoc:
       self.io      = io
       self.options = options
+    end
+  end
+
+  ##
+  # A very simple reporter that prints the "dots" during the run.
+  #
+  # This is added to the top-level CompositeReporter at the start of
+  # the run. If you want to change the output of minitest via a
+  # plugin, pull this out of the composite and replace it with your
+  # own.
+
+  class ProgressReporter < Reporter
+    def record result # :nodoc:
+      io.print "%s#%s = %.2f s = " % [result.class, result.name, result.time] if
+        options[:verbose]
+      io.print result.result_code
+      io.puts if options[:verbose]
+    end
+  end
+
+  ##
+  # A reporter that prints the header, summary, and failure details at
+  # the end of the run.
+  #
+  # If you want to create an entirely different type of output (eg,
+  # CI, HTML, etc), this is the place to start.
+
+  class SummaryReporter < Reporter
+    # :stopdoc:
+    attr_accessor :assertions
+    attr_accessor :count
+    attr_accessor :results
+    attr_accessor :start_time
+    attr_accessor :sync
+    attr_accessor :old_sync
+    # :startdoc:
+
+    def initialize io = $stdout, options = {} # :nodoc:
+      super
 
       self.assertions = 0
       self.count      = 0
@@ -381,60 +454,32 @@ module Minitest
       self.start_time = nil
     end
 
-    ##
-    # Did this run pass?
-
-    def passed?
+    def passed? # :nodoc:
       results.all?(&:skipped?)
     end
 
-    ##
-    # Top-level method to ensure that start and report are called.
-    # Yields to the caller.
-
-    def run_and_report
-      start
-
-      yield
-
-      report
-    end
-
-    ##
-    # Starts reporting on the run.
-
-    def start
-      self.sync = io.respond_to? :"sync=" # stupid emacs
-      self.old_sync, io.sync = io.sync, true if self.sync
-
+    def start # :nodoc:
       self.start_time = Time.now
 
       io.puts "Run options: #{options[:args]}"
       io.puts
       io.puts "# Running:"
       io.puts
+
+      self.sync = io.respond_to? :"sync=" # stupid emacs
+      self.old_sync, io.sync = io.sync, true if self.sync
     end
 
-    ##
-    # Record a result and output the Runnable#result_code. Stores the
-    # result of the run if the run did not pass.
-
-    def record result
+    def record result # :nodoc:
       self.count += 1
       self.assertions += result.assertions
-
-      io.print "%s#%s = %.2f s = " % [result.class, result.name, result.time] if
-      options[:verbose]
-      io.print result.result_code
-      io.puts if options[:verbose]
 
       results << result if not result.passed? or result.skipped?
     end
 
-    ##
-    # Outputs the summary of the run.
+    def report # :nodoc:
+      io.sync = self.old_sync
 
-    def report
       aggregate = results.group_by { |r| r.failure.class }
       aggregate.default = [] # dumb. group_by should provide this
 
@@ -451,24 +496,25 @@ module Minitest
       format = "%d runs, %d assertions, %d failures, %d errors, %d skips"
       summary = format % [count, self.assertions, f, e, s]
 
+      io.print self
+      io.puts
+      io.puts summary
+    end
+
+    def to_s # :nodoc:
       filtered_results = results.dup
       filtered_results.reject!(&:skipped?) unless options[:verbose]
 
-      filtered_results.each_with_index do |result, i|
-        io.puts "\n%3d) %s" % [i+1, result]
-      end
-
-      io.puts
-      io.puts summary
-
-      io.sync = self.old_sync if self.sync
+      filtered_results.each_with_index.map do |result, i|
+        "\n%3d) %s" % [i+1, result]
+      end.join "\n"
     end
   end
 
   ##
   # Dispatch to multiple reporters as one.
 
-  class CompositeReporter < Reporter
+  class CompositeReporter < AbstractReporter
     ##
     # The list of reporters to dispatch to.
 

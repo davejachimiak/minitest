@@ -432,7 +432,7 @@ class TestMinitestRunner < MetaMetaMetaTestCase
       def self.name; "wacky!" end
 
       def self.before_my_suite
-        @reporter.io.puts "Running #{self.name} tests"
+        @reporter.reporters.first.io.puts "Running #{self.name} tests"
         @@foo = 1
       end
 
@@ -638,7 +638,7 @@ class TestMinitestUnitOrder < MetaMetaMetaTestCase
 end
 
 class TestMinitestRunnable < Minitest::Test
-  def setup_dup klass
+  def setup_marshal klass
     tc = klass.new "whatever"
     tc.assertions = 42
     tc.failures << "a failure"
@@ -653,8 +653,8 @@ class TestMinitestRunnable < Minitest::Test
     @tc = tc
   end
 
-  def assert_dup expected_ivars
-    new_tc = @tc.dup
+  def assert_marshal expected_ivars
+    new_tc = Marshal.load Marshal.dump @tc
 
     ivars = new_tc.instance_variables.map(&:to_s).sort
     assert_equal expected_ivars, ivars
@@ -665,20 +665,20 @@ class TestMinitestRunnable < Minitest::Test
     yield new_tc if block_given?
   end
 
-  def test_dup
-    setup_dup Minitest::Runnable
+  def test_marshal
+    setup_marshal Minitest::Runnable
 
-    assert_dup %w(@NAME @assertions @failures)
+    assert_marshal %w(@NAME @assertions @failures)
   end
 end
 
 class TestMinitestTest < TestMinitestRunnable
   def test_dup
-    setup_dup Minitest::Test do |tc|
+    setup_marshal Minitest::Test do |tc|
       tc.time = 3.14
     end
 
-    assert_dup %w(@NAME @assertions @failures @time) do |new_tc|
+    assert_marshal %w(@NAME @assertions @failures @time) do |new_tc|
       assert_in_epsilon 3.14, new_tc.time
     end
   end
@@ -1750,7 +1750,7 @@ class TestMinitestUnitRecording < MetaMetaMetaTestCase
 
     run_tu_with_fresh_reporter
 
-    recorded = reporter.results.map(&:failures).flatten.map { |f| f.error.class }
+    recorded = first_reporter.results.map(&:failures).flatten.map { |f| f.error.class }
 
     assert_equal expected, recorded
   end
@@ -1828,7 +1828,7 @@ class TestMinitestUnitRecording < MetaMetaMetaTestCase
           FILE:LINE:in `teardown'
     "
 
-    assert_equal exp.strip, normalize_output(reporter.results.first.to_s).strip
+    assert_equal exp.strip, normalize_output(first_reporter.results.first.to_s).strip
   end
 
   def test_record_skip
